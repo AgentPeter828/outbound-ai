@@ -1,6 +1,6 @@
 import { inngest } from "../client"
 import { createClient } from "@/lib/supabase/server"
-import { apolloClient } from "@/lib/apollo"
+import { enrichCompany, enrichContact } from "@/lib/apollo"
 import { redis, CACHE_TTL } from "@/lib/redis"
 
 /**

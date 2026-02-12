@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
-import { generateOutreachEmail, generateSequence } from "@/lib/ai/anthropic"
+import { generateEmail, generateSequence } from "@/lib/ai/anthropic"
 
 export async function POST(request: NextRequest) {
   try {

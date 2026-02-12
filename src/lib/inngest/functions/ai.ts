@@ -1,8 +1,8 @@
 import { inngest } from "../client"
 import { createClient } from "@/lib/supabase/server"
-import { generateOutreachEmail } from "@/lib/ai/anthropic"
+import { generateEmail as generateEmailContent } from "@/lib/ai/anthropic"
 import { classifyReply as classifyWithKimi } from "@/lib/ai/openrouter"
-import { checkSpam } from "@/lib/ai/groq"
+import { checkSpamScore } from "@/lib/ai/groq"
 
 /**
  * Generate personalized email for a sequence step
@@ -96,49 +96,54 @@ export const generateEmail = inngest.createFunction(
 
     // Generate email using Claude
     const emailContent = await step.run("generate-with-claude", async () => {
-      const context = {
+      return await generateEmailContent({
+        template: currentStep.body_template,
         contact: {
           firstName: contact.first_name,
           lastName: contact.last_name,
           title: contact.title,
-          email: contact.email,
+          company: contact.company?.name || '',
         },
         company: contact.company ? {
           name: contact.company.name,
           industry: contact.company.industry,
-          size: contact.company.employee_count,
-          technologies: contact.company.technologies || [],
-        } : undefined,
+          description: '',
+          techStack: contact.company.technologies || [],
+          fundingStage: '',
+        } : {
+          name: '',
+          industry: '',
+          description: '',
+          techStack: [],
+          fundingStage: '',
+        },
         sequence: {
-          name: sequence.name,
-          goal: sequence.goal,
           stepNumber: step_number,
-          totalSteps: sequence.steps.length,
+          productDescription: sequence.goal,
+          valueProposition: sequence.name,
+          previousEmails: previousEmails.map((e) => e.subject || ''),
         },
-        template: {
-          subject: currentStep.subject_template,
-          body: currentStep.body_template,
-        },
-        previousEmails: previousEmails.map((e) => ({
-          subject: e.subject,
-          sentAt: e.created_at,
-        })),
-      }
-
-      return await generateOutreachEmail(context)
+        senderName: 'Sales Team',
+        senderCompany: 'OutboundAI',
+      })
     })
 
     // Check for spam score
     const spamCheck = await step.run("check-spam", async () => {
-      return await checkSpam(emailContent.body, emailContent.subject)
+      return await checkSpamScore({
+        subject: emailContent.subject,
+        body: emailContent.body,
+        senderName: 'Sales Team',
+        senderEmail: 'sales@outboundai.com',
+      })
     })
 
     // Calculate AI confidence based on spam score and personalization
     const aiConfidence = await step.run("calc-confidence", async () => {
       let confidence = 95
 
-      // Reduce confidence based on spam score
-      confidence -= spamCheck.score * 5
+      // Reduce confidence based on spam score (convert 0-100 to 0-1 scale)
+      confidence -= (100 - spamCheck.spamScore) / 5
 
       // Reduce if company info is missing
       if (!contact.company) {
@@ -166,7 +171,7 @@ export const generateEmail = inngest.createFunction(
         subject: emailContent.subject,
         body: emailContent.body,
         ai_confidence: aiConfidence,
-        spam_score: spamCheck.score,
+        spam_score: spamCheck.spamScore,
         status: aiConfidence >= 90 ? "approved" : "pending", // Auto-approve high confidence
         metadata: {
           generation_model: "claude-sonnet-4",
