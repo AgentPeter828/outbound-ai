@@ -16,10 +16,52 @@ import {
   Sparkles,
   Calendar,
   AlertTriangle,
+  ArrowLeft,
+  Flame,
 } from "lucide-react"
 import Link from "next/link"
 
-async function DashboardStats() {
+interface PageProps {
+  searchParams: Promise<{ business?: string }>
+}
+
+async function BusinessContext({ businessSlug }: { businessSlug: string }) {
+  const supabase = await createClient()
+
+  // Try to fetch business info from the shared businesses table
+  const { data: business } = await supabase
+    .from("businesses")
+    .select("name, description, slug")
+    .eq("slug", businessSlug)
+    .single()
+
+  return (
+    <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 flex items-center justify-between">
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-100">
+          <Flame className="h-5 w-5 text-violet-600" />
+        </div>
+        <div>
+          <p className="text-sm text-violet-600 font-medium">Firestorm Business</p>
+          <h2 className="text-lg font-bold text-violet-900">
+            {business?.name || businessSlug}
+          </h2>
+          {business?.description && (
+            <p className="text-sm text-violet-700/70 mt-0.5 line-clamp-1">{business.description}</p>
+          )}
+        </div>
+      </div>
+      <Button variant="outline" size="sm" asChild className="border-violet-200 text-violet-700 hover:bg-violet-100">
+        <Link href={`http://localhost:3000/portfolio/${businessSlug}`}>
+          <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+          Back to Firestorm
+        </Link>
+      </Button>
+    </div>
+  )
+}
+
+async function DashboardStats({ businessSlug }: { businessSlug?: string }) {
   const supabase = await createClient()
 
   const { data: membership } = await supabase
@@ -31,51 +73,70 @@ async function DashboardStats() {
 
   const workspaceId = membership.workspace_id
 
-  // Fetch stats in parallel
+  // Build queries with optional business filtering
+  let companiesQuery = supabase.from("companies").select("*", { count: "exact", head: true }).eq("workspace_id", workspaceId)
+  let contactsQuery = supabase.from("contacts").select("*", { count: "exact", head: true }).eq("workspace_id", workspaceId)
+  let dealsQuery = supabase.from("deals").select("value, stage").eq("workspace_id", workspaceId).not("stage", "eq", "closed_lost")
+  let sequencesQuery = supabase.from("sequences").select("*", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "active")
+
+  // If business context, also show outbound-specific stats
+  if (businessSlug) {
+    const [
+      { count: prospectsCount },
+      { data: emails },
+      { count: meetingsCount },
+      { data: deals },
+    ] = await Promise.all([
+      supabase.from("outbound_prospects").select("*", { count: "exact", head: true }).eq("business_slug", businessSlug),
+      supabase.from("outbound_emails").select("status, replied").eq("business_slug", businessSlug),
+      supabase.from("outbound_meetings").select("*", { count: "exact", head: true }).eq("business_slug", businessSlug),
+      supabase.from("outbound_deals").select("value, stage").eq("business_slug", businessSlug),
+    ])
+
+    const emailsSent = emails?.filter(e => e.status === "sent" || e.status === "delivered").length || 0
+    const repliedCount = emails?.filter(e => e.replied).length || 0
+    const pipelineVal = deals?.filter(d => !["closed_won", "closed_lost"].includes(d.stage)).reduce((s, d) => s + (d.value || 0), 0) || 0
+
+    const stats = [
+      { name: "Prospects", value: (prospectsCount || 0).toString(), icon: Users, change: "", changeType: "positive" as const },
+      { name: "Emails Sent", value: emailsSent.toString(), icon: Mail, change: "", changeType: "positive" as const },
+      { name: "Reply Rate", value: emailsSent > 0 ? `${((repliedCount / emailsSent) * 100).toFixed(1)}%` : "0%", icon: TrendingUp, change: "", changeType: "positive" as const },
+      { name: "Pipeline Value", value: formatCurrency(pipelineVal), icon: DollarSign, change: "", changeType: "positive" as const },
+    ]
+
+    return (
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        {stats.map((stat) => (
+          <Card key={stat.name}>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">{stat.name}</CardTitle>
+              <stat.icon className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{stat.value}</div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    )
+  }
+
+  // Default workspace-wide stats
   const [
     { count: companiesCount },
     { count: contactsCount },
     { data: deals },
     { count: activeSequences },
-  ] = await Promise.all([
-    supabase.from("companies").select("*", { count: "exact", head: true }).eq("workspace_id", workspaceId),
-    supabase.from("contacts").select("*", { count: "exact", head: true }).eq("workspace_id", workspaceId),
-    supabase.from("deals").select("value, stage").eq("workspace_id", workspaceId).not("stage", "eq", "closed_lost"),
-    supabase.from("sequences").select("*", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("status", "active"),
-  ])
+  ] = await Promise.all([companiesQuery, contactsQuery, dealsQuery, sequencesQuery])
 
   const pipelineValue = deals?.reduce((sum, deal) => sum + (deal.value || 0), 0) || 0
   const openDeals = deals?.filter(d => !["closed_won", "closed_lost"].includes(d.stage)).length || 0
 
   const stats = [
-    {
-      name: "Pipeline Value",
-      value: formatCurrency(pipelineValue),
-      change: "+12.5%",
-      changeType: "positive" as const,
-      icon: DollarSign,
-    },
-    {
-      name: "Open Deals",
-      value: openDeals.toString(),
-      change: "+4.3%",
-      changeType: "positive" as const,
-      icon: TrendingUp,
-    },
-    {
-      name: "Companies",
-      value: (companiesCount || 0).toString(),
-      change: "+8.2%",
-      changeType: "positive" as const,
-      icon: Building2,
-    },
-    {
-      name: "Contacts",
-      value: (contactsCount || 0).toString(),
-      change: "+15.1%",
-      changeType: "positive" as const,
-      icon: Users,
-    },
+    { name: "Pipeline Value", value: formatCurrency(pipelineValue), change: "+12.5%", changeType: "positive" as const, icon: DollarSign },
+    { name: "Open Deals", value: openDeals.toString(), change: "+4.3%", changeType: "positive" as const, icon: TrendingUp },
+    { name: "Companies", value: (companiesCount || 0).toString(), change: "+8.2%", changeType: "positive" as const, icon: Building2 },
+    { name: "Contacts", value: (contactsCount || 0).toString(), change: "+15.1%", changeType: "positive" as const, icon: Users },
   ]
 
   return (
@@ -88,17 +149,19 @@ async function DashboardStats() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{stat.value}</div>
-            <p className="text-xs text-muted-foreground flex items-center gap-1">
-              {stat.changeType === "positive" ? (
-                <ArrowUpRight className="h-3 w-3 text-green-500" />
-              ) : (
-                <ArrowDownRight className="h-3 w-3 text-red-500" />
-              )}
-              <span className={stat.changeType === "positive" ? "text-green-500" : "text-red-500"}>
-                {stat.change}
-              </span>
-              from last month
-            </p>
+            {stat.change && (
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                {stat.changeType === "positive" ? (
+                  <ArrowUpRight className="h-3 w-3 text-green-500" />
+                ) : (
+                  <ArrowDownRight className="h-3 w-3 text-red-500" />
+                )}
+                <span className={stat.changeType === "positive" ? "text-green-500" : "text-red-500"}>
+                  {stat.change}
+                </span>
+                from last month
+              </p>
+            )}
           </CardContent>
         </Card>
       ))}
@@ -280,7 +343,6 @@ async function AIRecommendations() {
 
   if (!membership) return null
 
-  // Get deals with AI recommendations
   const { data: deals } = await supabase
     .from("deals")
     .select(`
@@ -349,18 +411,31 @@ function StatsSkeleton() {
   )
 }
 
-export default function DashboardPage() {
+export default async function DashboardPage({ searchParams }: PageProps) {
+  const params = await searchParams
+  const businessSlug = params.business
+
   return (
     <div className="space-y-6">
+      {businessSlug && (
+        <Suspense fallback={<Skeleton className="h-20" />}>
+          <BusinessContext businessSlug={businessSlug} />
+        </Suspense>
+      )}
+
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
+        <h1 className="text-3xl font-bold tracking-tight">
+          {businessSlug ? "Sales Dashboard" : "Dashboard"}
+        </h1>
         <p className="text-muted-foreground">
-          Welcome back! Here&apos;s what&apos;s happening with your pipeline.
+          {businessSlug
+            ? `Outbound sales metrics for ${businessSlug}`
+            : "Welcome back! Here's what's happening with your pipeline."}
         </p>
       </div>
 
       <Suspense fallback={<StatsSkeleton />}>
-        <DashboardStats />
+        <DashboardStats businessSlug={businessSlug} />
       </Suspense>
 
       <div className="grid gap-6 md:grid-cols-2">
