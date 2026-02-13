@@ -1,6 +1,6 @@
 import { inngest } from "../client"
 import { createClient } from "@/lib/supabase/server"
-import { generateEmail as generateEmailContent } from "@/lib/ai/anthropic"
+import { generateEmail as generateEmailContent, generateContextualReply } from "@/lib/ai/anthropic"
 import { classifyReply as classifyWithKimi } from "@/lib/ai/openrouter"
 import { checkSpamScore } from "@/lib/ai/groq"
 
@@ -96,6 +96,10 @@ export const generateEmail = inngest.createFunction(
 
     // Generate email using Claude
     const emailContent = await step.run("generate-with-claude", async () => {
+      // Extract research hooks from contact/company metadata if available
+      const contactMeta = (contact as Record<string, unknown>).metadata as Record<string, string> | null
+      const companyMeta = (contact.company as Record<string, unknown> | null)?.metadata as Record<string, string> | null
+
       return await generateEmailContent({
         template: currentStep.body_template,
         contact: {
@@ -103,13 +107,16 @@ export const generateEmail = inngest.createFunction(
           lastName: contact.last_name,
           title: contact.title,
           company: contact.company?.name || '',
+          seniorityLevel: (contact as Record<string, unknown>).seniority as string || undefined,
+          location: (contact as Record<string, unknown>).location as string || undefined,
         },
         company: contact.company ? {
           name: contact.company.name,
           industry: contact.company.industry,
-          description: '',
+          description: companyMeta?.description || '',
           techStack: contact.company.technologies || [],
-          fundingStage: '',
+          fundingStage: companyMeta?.funding_stage || '',
+          employeeCount: contact.company.employee_count,
         } : {
           name: '',
           industry: '',
@@ -119,9 +126,17 @@ export const generateEmail = inngest.createFunction(
         },
         sequence: {
           stepNumber: step_number,
+          totalSteps: sequence.steps.length,
           productDescription: sequence.goal,
           valueProposition: sequence.name,
-          previousEmails: previousEmails.map((e) => e.subject || ''),
+          previousEmails: previousEmails.map((e) => `Subject: ${e.subject || ''}\n${e.body || ''}`),
+        },
+        researchHooks: {
+          recentNews: contactMeta?.recent_news || companyMeta?.recent_news,
+          linkedinRecentPost: contactMeta?.linkedin_recent_post,
+          recentJobPostings: companyMeta?.recent_job_postings,
+          techStackChanges: companyMeta?.tech_stack_changes,
+          recentContent: contactMeta?.recent_content,
         },
         senderName: 'Sales Team',
         senderCompany: 'OutboundAI',
@@ -226,7 +241,16 @@ export const classifyReply = inngest.createFunction(
 
     // Classify using Kimi K2
     const classification = await step.run("classify-with-kimi", async () => {
-      return await classifyWithKimi(content)
+      const result = await classifyWithKimi({
+        emailBody: content,
+        originalSubject: '',
+      })
+      return {
+        category: result.classification,
+        confidence: result.confidence,
+        summary: result.summary,
+        suggestedAction: result.suggestedAction,
+      }
     })
 
     // Get sentiment
@@ -248,34 +272,83 @@ export const classifyReply = inngest.createFunction(
 
     // Generate AI summary
     const aiSummary = await step.run("generate-summary", async () => {
-      const summaryMap: Record<string, string> = {
-        interested: "The prospect has expressed interest and may be ready to schedule a meeting.",
-        not_interested: "The prospect has indicated they are not interested at this time.",
-        objection: "The prospect has raised concerns that should be addressed.",
-        out_of_office: "The prospect is currently out of office. Consider following up later.",
-        wrong_person: "This may not be the right contact. Consider asking for a referral.",
-        unsubscribe: "The prospect has requested to be removed from communications.",
-        meeting_request: "The prospect wants to schedule a meeting.",
-        question: "The prospect has questions that need to be answered.",
-      }
-
-      return summaryMap[classification.category] || "Review this reply to determine next steps."
+      return classification.summary || "Review this reply to determine next steps."
     })
 
-    // Generate suggested reply
+    // Get original email context for contextual reply generation
+    const originalEmail = await step.run("get-original-email", async () => {
+      const supabase = await createClient()
+
+      const { data } = await supabase
+        .from("interactions")
+        .select("subject, body, contact_id, metadata")
+        .eq("contact_id", (await supabase
+          .from("interactions")
+          .select("contact_id")
+          .eq("id", interaction_id)
+          .single()
+        ).data?.contact_id)
+        .eq("type", "email_sent")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single()
+
+      return data
+    })
+
+    // Get contact info for contextual reply
+    const contactForReply = await step.run("get-contact-for-reply", async () => {
+      const supabase = await createClient()
+
+      const { data: interaction } = await supabase
+        .from("interactions")
+        .select("contact_id")
+        .eq("id", interaction_id)
+        .single()
+
+      if (!interaction) return null
+
+      const { data } = await supabase
+        .from("contacts")
+        .select("first_name, last_name, title, company:companies(name)")
+        .eq("id", interaction.contact_id)
+        .single()
+
+      return data
+    })
+
+    // Generate contextual AI reply instead of canned templates
     const suggestedReply = await step.run("generate-suggested-reply", async () => {
-      const replyTemplates: Record<string, string> = {
-        interested: `Thank you for your interest! I'd love to find a time to chat. Would any of these times work for a quick 15-minute call?\n\n[Insert calendar link]\n\nLooking forward to connecting!`,
-        meeting_request: `Great, I'd be happy to set up a meeting! Here's my calendar link to find a time that works:\n\n[Insert calendar link]\n\nLooking forward to it!`,
-        objection: `I appreciate you sharing that concern. Many of our customers had similar questions initially. Let me address that...\n\n[Address specific objection]\n\nWould you be open to a quick call to discuss further?`,
-        question: `Great question! [Answer the specific question]\n\nDoes that help clarify things? Happy to jump on a quick call if you'd like to discuss further.`,
-        out_of_office: null,
-        not_interested: null,
-        wrong_person: `Thank you for letting me know. Could you point me to the right person to speak with about [topic]?\n\nI appreciate your help!`,
-        unsubscribe: null,
+      // Don't generate replies for out_of_office, not_interested, or unsubscribe
+      const skipCategories = ['out_of_office', 'not_interested', 'unsubscribe', 'bounce']
+      if (skipCategories.includes(classification.category)) {
+        return null
       }
 
-      return replyTemplates[classification.category] || null
+      try {
+        const company = contactForReply?.company as { name: string } | null
+        const result = await generateContextualReply({
+          prospectReply: content,
+          classification: classification.category,
+          originalEmail: {
+            subject: originalEmail?.subject || '',
+            body: originalEmail?.body || '',
+          },
+          contact: {
+            firstName: contactForReply?.first_name || '',
+            lastName: contactForReply?.last_name || '',
+            title: contactForReply?.title || '',
+            company: company?.name || '',
+          },
+          senderName: 'Sales Team',
+          senderCompany: 'OutboundAI',
+          productDescription: '',
+        })
+        return result.reply
+      } catch {
+        // Fallback: return null and let user write manually
+        return null
+      }
     })
 
     // Update the interaction
@@ -498,14 +571,19 @@ export const spamCheck = inngest.createFunction(
 
     // Check with Groq for fast spam analysis
     const result = await step.run("check-spam", async () => {
-      return await checkSpam(email_content, subject)
+      return await checkSpamScore({
+        subject,
+        body: email_content,
+        senderName: 'Sales Team',
+        senderEmail: 'sales@outboundai.com',
+      })
     })
 
     return {
       success: true,
-      spam_score: result.score,
-      flags: result.flags,
-      is_safe: result.score < 3,
+      spam_score: result.spamScore,
+      flags: result.issues,
+      is_safe: result.spamScore >= 70,
     }
   }
 )

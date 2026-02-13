@@ -44,12 +44,14 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: "Contact is required" }, { status: 400 })
         }
 
-        const result = await generateOutreachEmail({
+        const result = await generateEmail({
           contact,
-          company,
-          template,
-          previousEmails,
-          sequence: params.sequence,
+          company: company || { name: '', industry: '', description: '', techStack: [], fundingStage: '' },
+          template: template || '',
+          sequence: params.sequence || { stepNumber: 1, productDescription: '', valueProposition: '' },
+          senderName: 'Sales Team',
+          senderCompany: 'OutboundAI',
+          researchHooks: params.researchHooks,
         })
 
         return NextResponse.json({ result })
@@ -63,10 +65,10 @@ export async function POST(request: NextRequest) {
         }
 
         const result = await generateSequence({
-          name,
-          goal,
-          icp,
-          numSteps,
+          productDescription: goal,
+          targetAudience: icp || '',
+          valueProposition: name || '',
+          numberOfSteps: numSteps,
           tone,
         })
 

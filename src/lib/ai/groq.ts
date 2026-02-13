@@ -51,10 +51,20 @@ export async function checkSpamScore(params: {
 }> {
   const systemPrompt = `You are an email deliverability expert. Analyze emails for spam triggers.
 Score from 0 (definitely spam) to 100 (definitely not spam).
-Identify issues and suggest fixes.
+Identify issues and provide specific rewrite suggestions for each issue.
+
+Check for:
+- Spam trigger words (free, guarantee, act now, limited time, click here, buy now, discount)
+- ALL CAPS words
+- Excessive punctuation (multiple ! or ?)
+- Too many links
+- Missing opt-out/unsubscribe language
+- Overly salesy tone
+- Generic sender names
+- Price mentions in cold emails
 
 Respond ONLY in JSON:
-{"spamScore": 85, "issues": ["Too many links"], "suggestions": ["Remove 2 links"]}`
+{"spamScore": 85, "issues": ["Too many links", "Uses 'free' in subject"], "suggestions": ["Remove 2 links — keep only one if needed", "Replace 'free trial' with 'worth exploring?' or 'happy to show you'"]}`
 
   const userPrompt = `Check this email for spam issues:
 
